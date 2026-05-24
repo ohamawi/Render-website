@@ -5,9 +5,6 @@
 # Flask tools for routing, forms, sessions, and redirects
 from flask import Flask, render_template_string, request, redirect, session
 
-# Allows Flask to run inside Jupyter Notebook
-import threading
-
 # Used for reading/writing JSON files
 import json
 
@@ -758,18 +755,5 @@ def logout():
 # RUN FLASK APP
 # =========================================================
 
-def run_app():
-
-    # 0.0.0.0 allows devices on your network to connect
-    app.run(
-        host="0.0.0.0",
-        port=5000,
-        use_reloader=False
-    )
-
-
 if __name__ == "__main__":
-    app.run(
-        host="0.0.0.0",
-        port=5000
-    )
+    app.run(host="0.0.0.0", port=5000)
