@@ -629,8 +629,12 @@ def logout():
 # RUN APPLICATION WITH DATABASE INITIALIZATION
 # =========================================================
 
+# AFTER (WORKS EVERYWHERE)
+
+# Run this out in the open global scope so Gunicorn executes it on startup
+init_db()
+
 if __name__ == "__main__":
-    init_db()  # Setup tables automatically before application run
     app.run(
         host="0.0.0.0",
         port=int(os.environ.get("PORT", 5000))
