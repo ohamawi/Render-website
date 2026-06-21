@@ -223,11 +223,14 @@ def load_schedule():
 # SHARED MODERN CSS & JS (WITH CHART.JS IMPORTED)
 # =========================================================
 
+# =========================================================
+# SHARED MODERN CSS
+# =========================================================
+
 SHARED_HEAD = """
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <style>
         :root {
             --bg-app: #f4f6f9;
@@ -316,7 +319,6 @@ SHARED_HEAD = """
         }
         button[type="submit"]:hover { background: var(--primary-hover); }
         
-        /* Inline styling additions for the search layout and templates boxes */
         .checkbox-container {
             display: flex;
             align-items: center;
@@ -375,59 +377,15 @@ SHARED_HEAD = """
         }
         .nav-links { display: flex; gap: 1rem; margin-bottom: 1.5rem; font-size: 0.95rem; }
     </style>
+    <script>
+        function toggleTheme() {
+            document.body.classList.toggle('dark-mode');
+            // Re-render chart if it exists on the dashboard page
+            if (typeof renderChart === "function") { renderChart(); }
+        }
+    </script>
 </head>
 <button class="theme-toggle" onclick="toggleTheme()">🌓 Toggle Mode</button>
-<script>
-    let globalChartInstance = null;
-
-    function renderChart() {
-        const ctx = document.getElementById('expenseChart').getContext('2d');
-        const labels = {{ chart_labels | tojson }};
-        const dataValues = {{ chart_values | tojson }};
-        const isDark = document.body.classList.contains('dark-mode');
-        
-        if (globalChartInstance) { globalChartInstance.destroy(); }
-        
-        // Fallback layout if the database ledger is empty
-        if (labels.length === 0) {
-            globalChartInstance = new Chart(ctx, {
-                type: 'doughnut',
-                data: {
-                    labels: ['No Data Available'],
-                    datasets: [{ data: [1], backgroundColor: [isDark ? '#334155' : '#e2e8f0'] }]
-                },
-                options: {
-                    plugins: { legend: { labels: { color: isDark ? '#94a3b8' : '#718096' } } }
-                }
-            });
-            return;
-        }
-
-        // Main Chart Generator
-        globalChartInstance = new Chart(ctx, {
-            type: 'doughnut',
-            data: {
-                labels: labels,
-                datasets: [{
-                    data: dataValues,
-                    backgroundColor: ['#4f46e5', '#10b981', '#ef4444', '#f59e0b', '#3b82f6', '#8b5cf6', '#ec4899'],
-                    borderWidth: 0
-                }]
-            },
-            options: {
-                plugins: {
-                    legend: {
-                        position: 'bottom',
-                        labels: { color: isDark ? '#f8fafc' : '#2d3748' }
-                    }
-                }
-            } // <-- Fixed: This closing bracket was missing!
-        });
-    }
-    
-    // Fire off chart calculation on initial viewport render pass
-    renderChart();
-</script>
 """
 
 
@@ -464,6 +422,7 @@ REGISTER_HTML = SHARED_HEAD + """
 """
 
 MAIN_HTML = SHARED_HEAD + """
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 <div class="app-container">
     <h1>Finance Tracker</h1>
     <p>Logged in as: <strong>{{ user }}</strong></p>
@@ -608,10 +567,10 @@ MAIN_HTML = SHARED_HEAD + """
                         labels: { color: isDark ? '#f8fafc' : '#2d3748' }
                     }
                 }
-            });
+            }
+        });
     }
     
-    // Fire off chart calculation on initial viewport render pass
     renderChart();
 </script>
 """
