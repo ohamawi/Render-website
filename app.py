@@ -1,9 +1,12 @@
+#!/usr/bin/env python
+# coding: utf-8
+
 # =========================================================
 # IMPORTS
 # =========================================================
 
 # Flask tools for routing, forms, sessions, and redirects
-from flask import Flask, render_template_string, request, redirect, session
+from flask import Flask, render_template_string, request, redirect, session, Response
 
 # Used to pull the current system date/month for automatic recurring logic
 from datetime import datetime
@@ -13,6 +16,10 @@ import os
 
 # SQLite database driver
 import sqlite3
+
+# CSV and IO modules for data export/import systems
+import csv
+import io
 
 # =========================================================
 # CREATE FLASK APP
@@ -120,11 +127,7 @@ def get_db_connection():
     return conn
 
 
-# =========================================================
-# RUN DB INITIALIZATION OUT IN THE OPEN
-# =========================================================
-# Moving this outside the main block guarantees Gunicorn builds your 
-# tables instantly on startup when deployed to production servers like Render!
+# Run DB initialization out in the open to support production servers like Render instantly
 init_db()
 
 
@@ -148,7 +151,6 @@ CATEGORIES = {
 # LOGIN CHECK
 # =========================================================
 
-# Simple utility to check if a user is currently logged into the session.
 def is_logged_in():
     return session.get("logged_in") and session.get("user")
 
@@ -157,8 +159,6 @@ def is_logged_in():
 # AUTOMATIC RECURRING TRANSACTION ENGINE (FEATURE 3)
 # =========================================================
 
-# Checks if any recurring templates for this user haven't been copied over 
-# into the transactions ledger yet for the current calendar month.
 def process_recurring_transactions(user):
     current_month = datetime.now().strftime("%Y-%m")  # Formats as '2026-06'
     conn = get_db_connection()
@@ -170,7 +170,6 @@ def process_recurring_transactions(user):
     """, (user, current_month)).fetchall()
     
     for t in templates:
-        # Build out a pristine date string using this month and the template's specified day
         day_str = str(t["day_of_month"]).zfill(2)
         target_date = f"{current_month}-{day_str}"
         
@@ -186,7 +185,6 @@ def process_recurring_transactions(user):
                 VALUES (?, ?, ?, ?, ?, ?)
             """, (user, target_date, t["description"], t["category"], t["amount"], t["is_income"]))
             
-        # Mark this month as completed for this specific template line
         conn.execute("UPDATE recurring_templates SET last_generated = ? WHERE id = ?", (current_month, t["id"]))
         
     conn.commit()
@@ -197,7 +195,6 @@ def process_recurring_transactions(user):
 # DATA RETRIEVAL HELPERS
 # =========================================================
 
-# Grabs all the journal entries written by the logged-in user.
 def load_journal():
     user = session.get("user")
     if not user:
@@ -208,7 +205,6 @@ def load_journal():
     return [dict(r) for r in rows]
 
 
-# Grabs all the calendar/schedule events saved by the logged-in user.
 def load_schedule():
     user = session.get("user")
     if not user:
@@ -218,10 +214,6 @@ def load_schedule():
     conn.close()
     return [dict(r) for r in rows]
 
-
-# =========================================================
-# SHARED MODERN CSS & JS (WITH CHART.JS IMPORTED)
-# =========================================================
 
 # =========================================================
 # SHARED MODERN CSS
@@ -305,7 +297,7 @@ SHARED_HEAD = """
         input:focus, select:focus, textarea:focus {
             outline: 2px solid var(--primary);
         }
-        button[type="submit"] {
+        button {
             background: var(--primary);
             color: white;
             border: none;
@@ -314,10 +306,10 @@ SHARED_HEAD = """
             cursor: pointer;
             font-size: 1rem;
             font-weight: 600;
-            width: 100%;
             transition: background 0.2s;
         }
-        button[type="submit"]:hover { background: var(--primary-hover); }
+        button:hover { background: var(--primary-hover); }
+        button[type="submit"] { width: 100%; }
         
         .checkbox-container {
             display: flex;
@@ -376,11 +368,21 @@ SHARED_HEAD = """
             background: var(--bg-app);
         }
         .nav-links { display: flex; gap: 1rem; margin-bottom: 1.5rem; font-size: 0.95rem; }
+        .system-box {
+            background: var(--bg-app);
+            padding: 1rem;
+            border-radius: 8px;
+            border: 1px solid var(--border-color);
+            margin: 1rem 0;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 1rem;
+        }
     </style>
     <script>
         function toggleTheme() {
             document.body.classList.toggle('dark-mode');
-            // Re-render chart if it exists on the dashboard page
             if (typeof renderChart === "function") { renderChart(); }
         }
     </script>
@@ -434,6 +436,17 @@ MAIN_HTML = SHARED_HEAD + """
     </div>
     
     <hr style="border: 0; border-top: 1px solid var(--border-color); margin: 1.5rem 0;">
+    
+    <h3>Backup & Sync</h3>
+    <div class="system-box">
+        <div>
+            <a href="/export" style="background: var(--primary); color: white; padding: 0.5rem 1rem; border-radius: 6px; font-weight: 600; text-decoration:none;">📥 Export Data (CSV)</a>
+        </div>
+        <form method="POST" action="/import" enctype="multipart/form-data" style="margin: 0; display: flex; gap: 0.5rem; align-items: center;">
+            <input type="file" name="csv_file" accept=".csv" required style="margin-bottom: 0; padding: 0.25rem; font-size: 0.85rem; width: auto;">
+            <button type="submit" style="padding: 0.5rem 1rem; font-size: 0.85rem;">📤 Import Data</button>
+        </form>
+    </div>
     
     <h3>Summary</h3>
     <div class="summary-grid">
@@ -502,7 +515,7 @@ MAIN_HTML = SHARED_HEAD + """
                 <th>Description</th>
                 <th>Category</th>
                 <th>Amount</th>
-                <th>Edit</th>
+                <th>Action</th>
             </tr>
         </thead>
         <tbody>
@@ -514,7 +527,10 @@ MAIN_HTML = SHARED_HEAD + """
                 <td class="{% if t.is_income %}val-income{% else %}val-expense{% endif %}">
                     {% if t.is_income %}+{% else %}-{% endif %}${{ t.amount }}
                 </td>
-                <td><a href="/edit/{{ loop.index0 }}">Edit</a></td>
+                <td>
+                    <a href="/edit/{{ t.id }}">Edit</a> | 
+                    <a href="/delete/{{ t.id }}" onclick="return confirm('Are you sure?')" style="color: var(--expense);">Delete</a>
+                </td>
             </tr>
             {% else %}
             <tr>
@@ -570,7 +586,6 @@ MAIN_HTML = SHARED_HEAD + """
             }
         });
     }
-    
     renderChart();
 </script>
 """
@@ -578,7 +593,28 @@ MAIN_HTML = SHARED_HEAD + """
 EDIT_HTML = SHARED_HEAD + """
 <div class="app-container">
     <h2>Edit Transaction</h2>
-    <p>Editing options are currently being initialized. <a href="/dashboard">Return to Dashboard</a></p>
+    <a href="/dashboard">← Cancel and Back</a>
+    <hr style="border: 0; border-top: 1px solid var(--border-color); margin: 1.5rem 0;">
+    
+    <form method="POST">
+        <label>Description</label>
+        <input name="description" value="{{ t.description }}" required>
+        
+        <label>Category</label>
+        <select name="category">
+            {% for c in categories %}
+                <option value="{{ c }}" {% if c == t.category %}selected{% endif %}>{{ c }}</option>
+            {% endfor %}
+        </select>
+        
+        <label>Amount ($)</label>
+        <input type="number" step="0.01" name="amount" value="{{ t.amount }}" required>
+        
+        <label>Date</label>
+        <input type="date" name="date" value="{{ t.date }}" required>
+        
+        <button type="submit">Update Transaction</button>
+    </form>
 </div>
 """
 
@@ -638,8 +674,6 @@ SCHEDULE_HTML = SHARED_HEAD + """
 # ROUTE ACTIONS
 # =========================================================
 
-# Handles the login route. Shows the form on a standard GET, 
-# and looks up the credentials in the users table on a POST.
 @app.route("/", methods=["GET", "POST"])
 def login():
     if is_logged_in():
@@ -664,8 +698,6 @@ def login():
     return render_template_string(LOGIN_HTML, error=error)
 
 
-# Handles new sign-ups. Checks if the username is already taken, 
-# and if not, saves the new username/password combo to the database.
 @app.route("/register", methods=["GET", "POST"])
 def register():
     error = ""
@@ -688,7 +720,6 @@ def register():
     return render_template_string(REGISTER_HTML, error=error)
 
 
-# Core view handling overall calculations, filtering metrics, and data charts.
 @app.route("/dashboard")
 def dashboard():
     if not is_logged_in():
@@ -696,23 +727,18 @@ def dashboard():
         return redirect("/")
 
     user = session.get("user")
-    
-    # Feature 3: Run recurring transactions engine right as the user hits the dashboard
     process_recurring_transactions(user)
 
-    # Feature 4: Catch searching and filtering arguments from incoming GET requests
     search_query = request.args.get("search", "")
     selected_category = request.args.get("filter_category", "")
 
     conn = get_db_connection()
     
-    # Base summary card logic (calculates totals over EVERYTHING, regardless of search bar query)
     all_rows = conn.execute("SELECT amount, is_income FROM transactions WHERE username = ?", (user,)).fetchall()
     income = sum(r["amount"] for r in all_rows if r["is_income"])
     expenses = sum(r["amount"] for r in all_rows if not r["is_income"])
     balance = income - expenses
 
-    # Feature 1: Query for chart breakdown metrics (Aggregates expenses grouped by category)
     chart_rows = conn.execute("""
         SELECT category, SUM(amount) as total 
         FROM transactions 
@@ -722,8 +748,7 @@ def dashboard():
     chart_labels = [r["category"] for r in chart_rows]
     chart_values = [r["total"] for r in chart_rows]
 
-    # Feature 4: Form dynamic parameters for search filter SQL query block
-    query = "SELECT date, description, category, amount, is_income FROM transactions WHERE username = ?"
+    query = "SELECT id, date, description, category, amount, is_income FROM transactions WHERE username = ?"
     params = [user]
     
     if search_query:
@@ -752,7 +777,6 @@ def dashboard():
     )
 
 
-# Takes form data from the dashboard and logs a new transaction.
 @app.route("/add", methods=["POST"])
 def add():
     if not is_logged_in():
@@ -760,54 +784,171 @@ def add():
 
     user = session.get("user")
     category = request.form["category"]
-    date_str = request.form["date"]  # Formats as 'YYYY-MM-DD'
+    date_str = request.form["date"]
     amount = float(request.form["amount"])
     description = request.form["description"]
     is_income = 1 if CATEGORIES[category] else 0
 
     conn = get_db_connection()
-    
-    # Save base entry directly to the primary database ledger
     conn.execute("""
         INSERT INTO transactions (username, date, description, category, amount, is_income) 
         VALUES (?, ?, ?, ?, ?, ?)
     """, (user, date_str, description, category, amount, is_income))
     
-    # Feature 3: If marked as recurring, extract the day element and save a template
     if request.form.get("is_recurring") == "on":
         try:
             day_of_month = int(date_str.split("-")[2])
-            current_month = date_str[:7]  # Extracts 'YYYY-MM'
-            
+            current_month = date_str[:7]
             conn.execute("""
                 INSERT INTO recurring_templates (username, day_of_month, description, category, amount, is_income, last_generated)
                 VALUES (?, ?, ?, ?, ?, ?, ?)
             """, (user, day_of_month, description, category, amount, is_income, current_month))
         except Exception:
-            pass  # Fail safely if date formatting acts strange
+            pass
             
     conn.commit()
     conn.close()
-
     return redirect("/dashboard")
 
 
-# Displays the journal logs page with all historical entries for this user.
+# =========================================================
+# COMPLETED TRANSACTION EDIT & DELETE SYSTEMS
+# =========================================================
+
+@app.route("/edit/<int:trans_id>", methods=["GET", "POST"])
+def edit(trans_id):
+    if not is_logged_in():
+        return redirect("/")
+    
+    user = session.get("user")
+    conn = get_db_connection()
+    
+    # Secure validation check to make sure users can only edit their own rows
+    t = conn.execute("SELECT * FROM transactions WHERE id = ? AND username = ?", (trans_id, user)).fetchone()
+    
+    if not t:
+        conn.close()
+        return redirect("/dashboard")
+        
+    if request.method == "POST":
+        description = request.form["description"]
+        category = request.form["category"]
+        amount = float(request.form["amount"])
+        date_str = request.form["date"]
+        is_income = 1 if CATEGORIES[category] else 0
+        
+        conn.execute("""
+            UPDATE transactions 
+            SET date = ?, description = ?, category = ?, amount = ?, is_income = ?
+            WHERE id = ? AND username = ?
+        """, (date_str, description, category, amount, is_income, trans_id, user))
+        conn.commit()
+        conn.close()
+        return redirect("/dashboard")
+        
+    conn.close()
+    return render_template_string(EDIT_HTML, t=t, categories=CATEGORIES.keys())
+
+
+@app.route("/delete/<int:trans_id>")
+def delete_transaction(trans_id):
+    if not is_logged_in():
+        return redirect("/")
+    
+    user = session.get("user")
+    conn = get_db_connection()
+    conn.execute("DELETE FROM transactions WHERE id = ? AND username = ?", (trans_id, user))
+    conn.commit()
+    conn.close()
+    return redirect("/dashboard")
+
+
+# =========================================================
+# COMPLETED DATA IMPORT / EXPORT ENGINES (CSV)
+# =========================================================
+
+@app.route("/export")
+def export_data():
+    if not is_logged_in():
+        return redirect("/")
+        
+    user = session.get("user")
+    conn = get_db_connection()
+    rows = conn.execute("""
+        SELECT date, description, category, amount, is_income 
+        FROM transactions WHERE username = ? ORDER BY date DESC
+    """, (user,)).fetchall()
+    conn.close()
+    
+    # Write to an in-memory string buffer
+    si = io.StringIO()
+    cw = csv.writer(si)
+    
+    # Header row
+    cw.writerow(["Date", "Description", "Category", "Amount", "Is_Income"])
+    
+    # Data rows
+    for r in rows:
+        cw.writerow([r["date"], r["description"], r["category"], r["amount"], r["is_income"]])
+        
+    output = si.getvalue()
+    return Response(
+        output,
+        mimetype="text/csv",
+        headers={"Content-disposition": f"attachment; filename=finance_backup_{user}.csv"}
+    )
+
+
+@app.route("/import", methods=["POST"])
+def import_data():
+    if not is_logged_in():
+        return redirect("/")
+        
+    user = session.get("user")
+    file = request.files.get("csv_file")
+    
+    if file and file.filename.endswith(".csv"):
+        # Process and read data from file stream text
+        stream = io.StringIO(file.stream.read().decode("UTF-8"), newline=None)
+        csv_input = csv.reader(stream)
+        
+        # Skip header layout line
+        header = next(csv_input, None)
+        
+        conn = get_db_connection()
+        for row in csv_input:
+            if len(row) < 5:
+                continue # Skip corrupt rows safely
+                
+            date_str, description, category, amount, is_income = row[0], row[1], row[2], float(row[3]), int(row[4])
+            
+            conn.execute("""
+                INSERT INTO transactions (username, date, description, category, amount, is_income)
+                VALUES (?, ?, ?, ?, ?, ?)
+            """, (user, date_str, description, category, amount, is_income))
+            
+        conn.commit()
+        conn.close()
+        
+    return redirect("/dashboard")
+
+
+# =========================================================
+# OTHER SYSTEM FEATURES (JOURNAL & SCHEDULER)
+# =========================================================
+
 @app.route("/journal")
 def journal():
     if not is_logged_in():
         return redirect("/")
-
     entries = load_journal()
     return render_template_string(JOURNAL_HTML, entries=entries)
 
 
-# Processes the form to add a new journal post and saves it to the database.
 @app.route("/journal/add", methods=["POST"])
 def add_journal():
     if not is_logged_in():
         return redirect("/")
-
     user = session.get("user")
     conn = get_db_connection()
     conn.execute(
@@ -816,26 +957,21 @@ def add_journal():
     )
     conn.commit()
     conn.close()
-
     return redirect("/journal")
 
 
-# Displays the scheduler layout page and grabs all upcoming entries.
 @app.route("/schedule")
 def schedule():
     if not is_logged_in():
         return redirect("/")
-
     events = load_schedule()
     return render_template_string(SCHEDULE_HTML, events=events)
 
 
-# Captures calendar forms and inserts a new event row into the schedule table.
 @app.route("/schedule/add", methods=["POST"])
 def add_event():
     if not is_logged_in():
         return redirect("/")
-
     user = session.get("user")
     conn = get_db_connection()
     conn.execute(
@@ -844,26 +980,14 @@ def add_event():
     )
     conn.commit()
     conn.close()
-
     return redirect("/schedule")
 
 
-# Quick placeholder route for editing single transaction lines down the road.
-@app.route("/edit/<int:index>")
-def edit(index):
-    return render_template_string(EDIT_HTML)
-
-
-# Clears out cookies/session values and kicks the user back to login.
 @app.route("/logout")
 def logout():
     session.clear()
     return redirect("/")
 
-
-# =========================================================
-# RUN APPLICATION TRADITIONAL RUNNERS
-# =========================================================
 
 if __name__ == "__main__":
     app.run(
